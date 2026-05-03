@@ -47,7 +47,7 @@ For compatible models, the integration supports on/off, dimming, RGB color, and 
 
 1. Open HACS.
 2. Go to the custom repositories section.
-3. Add `https://github.com/nirnachmani/Pixie_Plus_local` as an `Integration` repository.
+3. Add `https://github.com/nirnachmani/Pixie_Plus_Local` as an `Integration` repository.
 4. Search for `Pixie Plus Local` in HACS and download it.
 5. Restart Home Assistant.
 6. Go to Settings > Devices & Services > Add Integration.
