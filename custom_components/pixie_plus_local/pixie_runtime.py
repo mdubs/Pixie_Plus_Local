@@ -1400,7 +1400,7 @@ class PixieAuthHandler:
         force_ea_b64: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Run one-shot EA/EB exchange on port 53216 and return decrypted inventory JSON."""
-        debug_mode = bool(self.verbose)
+        debug_mode = self._debug_enabled()
         ts_float = time.time()
         ts = int(force_ts) if force_ts is not None else int(ts_float)
         nonce = int(force_nonce) if force_nonce is not None else self._derive_sync_53216_nonce(ts)
@@ -1495,6 +1495,20 @@ class PixieAuthHandler:
             "eb_payloads": [{"label": label, "b64": payload_b64} for label, payload_b64 in attempts],
         }
 
+        if debug_mode:
+            metadata_lines = [
+                f"hub_ip: {hub_ip}",
+                f"netid: {net_id_int}",
+                f"key_hex: {key_hex}",
+                f"ts_build: {ts}",
+                f"ts_send: {send_ts}",
+                f"ts_recv_start: {recv_start_ts}",
+                f"ts_recv_end: {recv_end_ts}",
+                f"nonce_hex: 0x{nonce:08x}",
+                f"payload_sources: {', '.join(label for label, _ in attempts)}",
+            ]
+            self._log_multiline_debug("53216 decrypt attempt metadata", metadata_lines)
+
         last_err: Optional[Exception] = None
         for label, payload_b64 in attempts:
             try:
@@ -1571,6 +1585,24 @@ class PixieAuthHandler:
         hit_count = sum(1 for x in candidate_results if x.get("ok"))
         if debug_mode:
             self._log_debug("53216 candidate decryptions: %s/%s successful JSON parses", hit_count, len(candidate_results))
+
+            candidate_lines = []
+            for rec in candidate_results:
+                base = (
+                    f"ts_label={rec.get('ts_label')} ts={rec.get('ts')} "
+                    f"source={rec.get('source')} ok={rec.get('ok')}"
+                )
+                if rec.get("ok"):
+                    extra = (
+                        f" mode={rec.get('mode')} inventory_shape={rec.get('is_inventory_shape')}"
+                        f" data_type={rec.get('data_type')}"
+                    )
+                    if rec.get("dict_keys"):
+                        extra += f" dict_keys={rec.get('dict_keys')}"
+                    candidate_lines.append(base + extra)
+                else:
+                    candidate_lines.append(base + f" error={rec.get('error')}")
+            self._log_multiline_debug("53216 candidate decryption matrix", candidate_lines)
 
         if debug_mode:
             with open("sync53216_debug_last.json", "w", encoding="utf-8") as fp:
