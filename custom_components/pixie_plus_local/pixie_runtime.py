@@ -668,6 +668,7 @@ class PixieAuthHandler:
                 sync_result = self._sync_inventory_53216_once(
                     hub_ip=hub_ip,
                     net_id_int=net_id_int,
+                    mesh_net2_int=int(self.meshnet2),
                     timeout=sync_timeout,
                 )
                 payload = self._extract_53216_inventory_payload(sync_result.get("data"))
@@ -1102,16 +1103,19 @@ class PixieAuthHandler:
         return wire
 
     @staticmethod
-    def _derive_sync_53216_nonce(unix_seconds: int) -> int:
-        """Derive 53216 nonce from timestamp.
+    def _derive_sync_53216_nonce(unix_seconds: int, mesh_net2: int) -> int:
+        """Derive 53216 nonce from timestamp and meshNet2.
 
-        From observed app hook tuples:
-          nonce_low24 XOR (unix_seconds & 0xFFFFFF) == 0x6e4996
-          nonce = 0x6e000000 | nonce_low24
+        nonce_high_byte = (meshNet2 >> 16) & 0xFF
+        xor_const       = meshNet2 & 0xFFFFFF
+        nonce_low24     = (unix_seconds & 0xFFFFFF) ^ xor_const
+        nonce           = (nonce_high_byte << 24) | nonce_low24
         """
+        xor_const = int(mesh_net2) & 0xFFFFFF
+        nonce_high = (int(mesh_net2) >> 16) & 0xFF
         ts_low24 = int(unix_seconds) & 0xFFFFFF
-        nonce_low24 = ts_low24 ^ 0x6E4996
-        return ((0x6E << 24) | (nonce_low24 & 0xFFFFFF)) & 0xFFFFFFFF
+        nonce_low24 = ts_low24 ^ xor_const
+        return ((nonce_high << 24) | (nonce_low24 & 0xFFFFFF)) & 0xFFFFFFFF
 
     @staticmethod
     def _read_sync_53216_eb_frames(
@@ -1394,6 +1398,7 @@ class PixieAuthHandler:
         self,
         hub_ip: str,
         net_id_int: int,
+        mesh_net2_int: int,
         timeout: float = 5.0,
         force_ts: Optional[int] = None,
         force_nonce: Optional[int] = None,
@@ -1403,7 +1408,7 @@ class PixieAuthHandler:
         debug_mode = self._debug_enabled()
         ts_float = time.time()
         ts = int(force_ts) if force_ts is not None else int(ts_float)
-        nonce = int(force_nonce) if force_nonce is not None else self._derive_sync_53216_nonce(ts)
+        nonce = int(force_nonce) if force_nonce is not None else self._derive_sync_53216_nonce(ts, mesh_net2_int)
         key_hex = self._derive_sync_53216_key(ts, net_id_int).hex()
         if force_ea_b64:
             ea_payload_b64 = "".join(str(force_ea_b64).split())
