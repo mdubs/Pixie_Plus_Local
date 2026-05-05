@@ -24,11 +24,15 @@ from homeassistant.helpers.selector import (
 from . import (
     CONF_HOME_ID,
     CONF_HOME_NAME,
+    CONF_INVENTORY_MODE,
     CONF_MESHNET,
     CONF_MESHNET2,
     CONF_NETID,
+    CONF_PIXIE_PASSWORD,
+    CONF_PIXIE_USERNAME,
     CONF_USER_ID,
     DOMAIN,
+    INVENTORY_MODE_CLOUD_FALLBACK,
 )
 from .pixie_runtime import CloudParams, PixieAuthError, PixieAuthHandler
 from .pixie_value_profiles import (
@@ -243,6 +247,21 @@ def _build_entry_data(cloud_params: CloudParams) -> dict[str, Any]:
     }
 
 
+def _build_entry_data_with_mode(
+    cloud_params: CloudParams,
+    *,
+    inventory_mode: str,
+    username: str,
+    password: str,
+) -> dict[str, Any]:
+    data = _build_entry_data(cloud_params)
+    data[CONF_INVENTORY_MODE] = inventory_mode
+    if inventory_mode == INVENTORY_MODE_CLOUD_FALLBACK:
+        data[CONF_PIXIE_USERNAME] = username
+        data[CONF_PIXIE_PASSWORD] = password
+    return data
+
+
 async def _async_validate_setup_input(user_input: dict[str, Any]) -> ValidatedSetup:
     """Validate credentials, derive runtime params, and verify local bootstrap."""
     username = str(user_input[CONF_USERNAME]).strip()
@@ -291,7 +310,12 @@ async def _async_validate_setup_input(user_input: dict[str, Any]) -> ValidatedSe
 
     return ValidatedSetup(
         title=_build_entry_title(handler, cloud_params),
-        data=_build_entry_data(cloud_params),
+        data=_build_entry_data_with_mode(
+            cloud_params,
+            inventory_mode=handler.inventory_mode,
+            username=username,
+            password=password,
+        ),
         options=options,
         has_cover_devices=has_cover_devices,
         cover_devices=cover_devices,

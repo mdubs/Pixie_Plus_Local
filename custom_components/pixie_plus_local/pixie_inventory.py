@@ -83,6 +83,23 @@ class GatewayIdentity:
     model_name: Optional[str]
     gateway_id: Optional[str]
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "gateway_mac": self.gateway_mac,
+            "model_no": self.model_no,
+            "model_name": self.model_name,
+            "gateway_id": self.gateway_id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "GatewayIdentity":
+        return cls(
+            gateway_mac=str(data.get("gateway_mac") or ""),
+            model_no=str(data.get("model_no") or ""),
+            model_name=str(data.get("model_name")) if data.get("model_name") is not None else None,
+            gateway_id=str(data.get("gateway_id")) if data.get("gateway_id") is not None else None,
+        )
+
 
 @dataclass
 class RuntimeState:
@@ -99,6 +116,37 @@ class RuntimeState:
     raw: Dict[str, Any] = field(default_factory=dict)
     last_source: str = "cloud_seed"
     last_updated_ms: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "online": self.online,
+            "presence": self.presence,
+            "is_on": self.is_on,
+            "br": self.br,
+            "rgb": self.rgb,
+            "effect": self.effect,
+            "effect_speed": self.effect_speed,
+            "r": self.r,
+            "raw": self.raw,
+            "last_source": self.last_source,
+            "last_updated_ms": self.last_updated_ms,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RuntimeState":
+        return cls(
+            online=data.get("online"),
+            presence=str(data.get("presence") or "offline"),
+            is_on=data.get("is_on"),
+            br=data.get("br"),
+            rgb=list(data.get("rgb")) if isinstance(data.get("rgb"), list) else None,
+            effect=data.get("effect"),
+            effect_speed=data.get("effect_speed"),
+            r=data.get("r"),
+            raw=dict(data.get("raw") or {}),
+            last_source=str(data.get("last_source") or "snapshot"),
+            last_updated_ms=data.get("last_updated_ms"),
+        )
 
 
 @dataclass
@@ -269,6 +317,33 @@ class DeviceCapabilities:
     supports_cover: bool = False
     capability_hints: Dict[str, Any] = field(default_factory=dict)
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "supports_onoff": self.supports_onoff,
+            "supports_dimming": self.supports_dimming,
+            "supports_color": self.supports_color,
+            "supports_effects": self.supports_effects,
+            "effect_names": list(self.effect_names),
+            "supports_multi_channel": self.supports_multi_channel,
+            "supports_usb_subentity": self.supports_usb_subentity,
+            "supports_cover": self.supports_cover,
+            "capability_hints": dict(self.capability_hints),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "DeviceCapabilities":
+        return cls(
+            supports_onoff=bool(data.get("supports_onoff", True)),
+            supports_dimming=bool(data.get("supports_dimming", False)),
+            supports_color=bool(data.get("supports_color", False)),
+            supports_effects=bool(data.get("supports_effects", False)),
+            effect_names=list(data.get("effect_names") or []),
+            supports_multi_channel=bool(data.get("supports_multi_channel", False)),
+            supports_usb_subentity=bool(data.get("supports_usb_subentity", False)),
+            supports_cover=bool(data.get("supports_cover", False)),
+            capability_hints=dict(data.get("capability_hints") or {}),
+        )
+
 
 @dataclass
 class DeviceRecord:
@@ -290,6 +365,41 @@ class DeviceRecord:
 
     capabilities: DeviceCapabilities = field(default_factory=DeviceCapabilities)
     runtime: RuntimeState = field(default_factory=RuntimeState)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "type": self.type,
+            "stype": self.stype,
+            "model_no": self.model_no,
+            "name": self.name,
+            "mac": self.mac,
+            "version": self.version,
+            "left_name": self.left_name,
+            "right_name": self.right_name,
+            "rooms": list(self.rooms),
+            "import_mode": self.import_mode,
+            "capabilities": self.capabilities.to_dict(),
+            "runtime": self.runtime.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "DeviceRecord":
+        return cls(
+            id=int(data.get("id", 0)),
+            type=int(data.get("type", 0)),
+            stype=int(data.get("stype", 0)),
+            model_no=str(data.get("model_no") or ""),
+            name=str(data.get("name") or ""),
+            mac=str(data.get("mac") or ""),
+            version=data.get("version"),
+            left_name=data.get("left_name"),
+            right_name=data.get("right_name"),
+            rooms=list(data.get("rooms") or []),
+            import_mode=data.get("import_mode"),
+            capabilities=DeviceCapabilities.from_dict(dict(data.get("capabilities") or {})),
+            runtime=RuntimeState.from_dict(dict(data.get("runtime") or {})),
+        )
 
 
 @dataclass
@@ -423,6 +533,50 @@ class PixieInventory:
             source=source,
             **kwargs,
         )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "home_id": self.home_id,
+            "home_name": self.home_name,
+            "user_id": self.user_id,
+            "net_id": self.net_id,
+            "mesh_net": self.mesh_net,
+            "mesh_net2": self.mesh_net2,
+            "generated_at": self.generated_at.isoformat(),
+            "gateway": self.gateway.to_dict() if self.gateway is not None else None,
+            "devices": [
+                self.devices_by_id[dev_id].to_dict()
+                for dev_id in sorted(self.devices_by_id)
+            ],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "PixieInventory":
+        generated_at_raw = data.get("generated_at")
+        try:
+            generated_at = datetime.fromisoformat(str(generated_at_raw))
+        except Exception:
+            generated_at = datetime.now()
+
+        inv = cls(
+            home_id=str(data.get("home_id") or ""),
+            home_name=str(data.get("home_name")) if data.get("home_name") is not None else None,
+            user_id=str(data.get("user_id") or "unknown"),
+            net_id=str(data.get("net_id")) if data.get("net_id") is not None else None,
+            mesh_net=str(data.get("mesh_net")) if data.get("mesh_net") is not None else None,
+            mesh_net2=str(data.get("mesh_net2")) if data.get("mesh_net2") is not None else None,
+            generated_at=generated_at,
+            gateway=GatewayIdentity.from_dict(dict(data.get("gateway") or {})) if isinstance(data.get("gateway"), dict) else None,
+        )
+
+        for rec_obj in data.get("devices") or []:
+            if not isinstance(rec_obj, dict):
+                continue
+            rec = DeviceRecord.from_dict(rec_obj)
+            rec.runtime = inv.state_store.bind(rec.id, rec.runtime)
+            inv.devices_by_id[rec.id] = rec
+
+        return inv
 
     def debug_lines(self) -> List[str]:
         lines: List[str] = []

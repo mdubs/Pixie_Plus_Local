@@ -11,6 +11,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -31,8 +32,106 @@ CONF_USER_ID = "user_id"
 CONF_MESHNET = "meshnet"
 CONF_MESHNET2 = "meshnet2"
 CONF_NETID = "netid"
+CONF_INVENTORY_MODE = "inventory_mode"
+CONF_PIXIE_USERNAME = "pixie_username"
+CONF_PIXIE_PASSWORD = "pixie_password"
+
+INVENTORY_MODE_LOCAL_53216 = "local_53216"
+INVENTORY_MODE_CLOUD_FALLBACK = "cloud_fallback"
 
 COORDINATOR_UPDATE_INTERVAL = timedelta(seconds=10)
+INVENTORY_STORE_VERSION = 1
+
+
+def _inventory_store(hass: HomeAssistant, entry: ConfigEntry) -> Store:
+    return Store(hass, INVENTORY_STORE_VERSION, f"{DOMAIN}_{entry.entry_id}_inventory")
+
+
+async def _async_load_inventory_snapshot(hass: HomeAssistant, entry: ConfigEntry) -> PixieInventory | None:
+    payload = await _inventory_store(hass, entry).async_load()
+    if not isinstance(payload, dict):
+        LOGGER.debug("No stored Pixie inventory snapshot found for entry %s", entry.entry_id)
+        return None
+    snapshot = payload.get("inventory")
+    if not isinstance(snapshot, dict):
+        LOGGER.debug("Stored Pixie inventory snapshot is missing inventory data for entry %s", entry.entry_id)
+        return None
+    try:
+        inventory = PixieInventory.from_dict(snapshot)
+        LOGGER.debug(
+            "Restored Pixie inventory snapshot for entry %s: home=%s devices=%s",
+            entry.entry_id,
+            inventory.home_id,
+            len(inventory.devices_by_id),
+        )
+        return inventory
+    except Exception as err:
+        LOGGER.warning("Could not restore Pixie inventory snapshot: %s", err)
+        return None
+
+
+async def _async_save_inventory_snapshot(hass: HomeAssistant, entry: ConfigEntry, inventory: PixieInventory | None) -> None:
+    if inventory is None:
+        return
+    await _inventory_store(hass, entry).async_save({"inventory": inventory.to_dict()})
+    LOGGER.debug(
+        "Saved Pixie inventory snapshot for entry %s: home=%s devices=%s",
+        entry.entry_id,
+        inventory.home_id,
+        len(inventory.devices_by_id),
+    )
+
+
+def _entry_inventory_mode(entry: ConfigEntry) -> str:
+    mode = str(entry.data.get(CONF_INVENTORY_MODE) or INVENTORY_MODE_LOCAL_53216)
+    resolved_mode = mode if mode in (INVENTORY_MODE_LOCAL_53216, INVENTORY_MODE_CLOUD_FALLBACK) else INVENTORY_MODE_LOCAL_53216
+    if resolved_mode != mode:
+        LOGGER.debug("Unknown Pixie inventory mode '%s', defaulting to %s", mode, resolved_mode)
+    return resolved_mode
+
+
+def _entry_username(entry: ConfigEntry) -> str:
+    return str(entry.data.get(CONF_PIXIE_USERNAME) or "")
+
+
+def _entry_password(entry: ConfigEntry) -> str:
+    return str(entry.data.get(CONF_PIXIE_PASSWORD) or "")
+
+
+async def _async_update_entry_runtime_data(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    cloud_params: CloudParams,
+    *,
+    inventory_mode: str,
+    username: str,
+    password: str,
+) -> None:
+    data = dict(entry.data)
+    data.update(
+        {
+            CONF_HOME_ID: cloud_params.home_id,
+            CONF_HOME_NAME: cloud_params.home_name,
+            CONF_USER_ID: cloud_params.user_id,
+            CONF_MESHNET: cloud_params.meshnet,
+            CONF_MESHNET2: cloud_params.meshnet2,
+            CONF_NETID: cloud_params.netid,
+            CONF_INVENTORY_MODE: inventory_mode,
+        }
+    )
+    if inventory_mode == INVENTORY_MODE_CLOUD_FALLBACK:
+        data[CONF_PIXIE_USERNAME] = username
+        data[CONF_PIXIE_PASSWORD] = password
+    else:
+        data.pop(CONF_PIXIE_USERNAME, None)
+        data.pop(CONF_PIXIE_PASSWORD, None)
+    hass.config_entries.async_update_entry(entry, data=data)
+    LOGGER.debug(
+        "Updated Pixie config entry %s for inventory mode %s%s",
+        entry.entry_id,
+        inventory_mode,
+        " with stored credentials" if inventory_mode == INVENTORY_MODE_CLOUD_FALLBACK else " without stored credentials",
+    )
 
 
 @dataclass(frozen=True)
@@ -220,6 +319,7 @@ class PixiePlusConfigEntryRuntimeData:
     cloud_params: CloudParams
     pixie_runtime: PixieRuntimeData
     coordinator: PixiePlusRuntimeCoordinator
+    entry: ConfigEntry
     restart_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @staticmethod
@@ -245,6 +345,10 @@ class PixiePlusConfigEntryRuntimeData:
         self.coordinator.hass.loop.call_soon_threadsafe(
             self.coordinator.async_set_updated_data,
             inventory,
+        )
+        self.coordinator.hass.loop.call_soon_threadsafe(
+            self.coordinator.hass.async_create_task,
+            _async_save_inventory_snapshot(self.coordinator.hass, self.entry, inventory),
         )
 
     async def async_ensure_runtime(self, hass: HomeAssistant, *, reason: str):
@@ -273,11 +377,15 @@ class PixiePlusConfigEntryRuntimeData:
             restart_handler.gateway_identity = self.pixie_runtime.inventory.gateway if self.pixie_runtime.inventory else None
             restart_handler.set_inventory_update_callback(self.push_inventory_update_from_thread)
 
+            username = _entry_username(self.entry)
+            password = _entry_password(self.entry)
+            inventory_mode = _entry_inventory_mode(self.entry)
+
             try:
                 restarted_runtime = await restart_handler.async_bootstrap_gateway(
                     self.cloud_params,
-                    username="",
-                    password="",
+                    username=username,
+                    password=password,
                     keep_control_alive=True,
                     wait_for_shutdown=False,
                     hydrate_inventory=False,
@@ -294,6 +402,7 @@ class PixiePlusConfigEntryRuntimeData:
             self.handler = restart_handler
             self.pixie_runtime.handler = restart_handler
             self.pixie_runtime.runtime_session = restarted_runtime.runtime_session
+            self.pixie_runtime.inventory_mode = inventory_mode
             if restarted_runtime.inventory is not None:
                 self.pixie_runtime.inventory = restarted_runtime.inventory
 
@@ -379,30 +488,107 @@ async def _async_build_runtime_data(
 ) -> PixiePlusConfigEntryRuntimeData:
     """Bootstrap the Pixie local runtime and its HA coordinator."""
     cloud_params = _cloud_params_from_entry(entry)
+    inventory_mode = _entry_inventory_mode(entry)
+    persisted_inventory = await _async_load_inventory_snapshot(hass, entry)
+    username = _entry_username(entry)
+    password = _entry_password(entry)
+
+    LOGGER.debug(
+        "Bootstrapping Pixie entry %s in %s mode%s",
+        entry.entry_id,
+        inventory_mode,
+        " with stored inventory snapshot available" if persisted_inventory is not None else " with no stored inventory snapshot",
+    )
+
     handler = PixieAuthHandler()
+    coordinator: PixiePlusRuntimeCoordinator | None = None
+
+    async def _shutdown_runtime() -> None:
+        runtime_session = handler.runtime_session
+        if runtime_session is not None:
+            await hass.async_add_executor_job(runtime_session.stop_and_join, 5.0)
 
     try:
-        pixie_runtime = await handler.async_bootstrap_gateway(
-            cloud_params,
-            username="",
-            password="",
-            keep_control_alive=True,
-            wait_for_shutdown=False,
-        )
+        if inventory_mode == INVENTORY_MODE_CLOUD_FALLBACK:
+            if not username or not password:
+                raise ConfigEntryError("Cloud fallback mode requires stored Pixie credentials")
+            try:
+                LOGGER.debug("Refreshing Pixie inventory from cloud for entry %s", entry.entry_id)
+                refreshed_cloud_params = await handler.async_fetch_cloud_params(
+                    username,
+                    password,
+                    include_inventory_seed=True,
+                )
+                cloud_params = refreshed_cloud_params
+                await _async_update_entry_runtime_data(
+                    hass,
+                    entry,
+                    cloud_params,
+                    inventory_mode=INVENTORY_MODE_CLOUD_FALLBACK,
+                    username=username,
+                    password=password,
+                )
+            except Exception as err:
+                if persisted_inventory is None:
+                    raise ConfigEntryNotReady(f"Pixie cloud refresh failed and no stored inventory is available: {err}") from err
+                LOGGER.warning("Pixie cloud refresh failed; using stored inventory snapshot: %s", err)
+                handler.inventory = persisted_inventory
+                handler.gateway_identity = persisted_inventory.gateway
+
+            pixie_runtime = await handler.async_bootstrap_gateway(
+                cloud_params,
+                username=username,
+                password=password,
+                keep_control_alive=True,
+                wait_for_shutdown=False,
+                hydrate_inventory=False,
+            )
+            pixie_runtime.inventory_mode = INVENTORY_MODE_CLOUD_FALLBACK
+            if pixie_runtime.inventory is None:
+                pixie_runtime.inventory = handler.inventory
+            LOGGER.debug("Pixie entry %s using cloud-assisted inventory mode", entry.entry_id)
+        else:
+            LOGGER.debug("Trying direct local Pixie inventory startup for entry %s", entry.entry_id)
+            pixie_runtime = await handler.async_bootstrap_gateway(
+                cloud_params,
+                username="",
+                password="",
+                keep_control_alive=True,
+                wait_for_shutdown=False,
+            )
+            pixie_runtime.inventory_mode = INVENTORY_MODE_LOCAL_53216
+            if pixie_runtime.inventory is None:
+                if persisted_inventory is None:
+                    raise ConfigEntryNotReady("Pixie startup inventory unavailable and no stored inventory snapshot exists")
+                LOGGER.warning("Direct local Pixie inventory startup failed; using stored inventory snapshot")
+                await _shutdown_runtime()
+                handler = PixieAuthHandler()
+                handler.inventory = persisted_inventory
+                handler.gateway_identity = persisted_inventory.gateway
+                pixie_runtime = await handler.async_bootstrap_gateway(
+                    cloud_params,
+                    username="",
+                    password="",
+                    keep_control_alive=True,
+                    wait_for_shutdown=False,
+                    hydrate_inventory=False,
+                )
+                pixie_runtime.inventory = persisted_inventory
+                pixie_runtime.inventory_mode = INVENTORY_MODE_LOCAL_53216
+            else:
+                LOGGER.debug("Direct local Pixie inventory startup succeeded for entry %s", entry.entry_id)
+
         coordinator = PixiePlusRuntimeCoordinator(hass, entry, pixie_runtime)
         handler.set_inventory_update_callback(
             lambda inventory: hass.loop.call_soon_threadsafe(coordinator.async_set_updated_data, inventory)
         )
         await coordinator.async_config_entry_first_refresh()
+        await _async_save_inventory_snapshot(hass, entry, pixie_runtime.inventory)
     except PixieAuthError as err:
-        runtime_session = handler.runtime_session
-        if runtime_session is not None:
-            await hass.async_add_executor_job(runtime_session.stop_and_join, 5.0)
+        await _shutdown_runtime()
         raise ConfigEntryNotReady(str(err)) from err
     except Exception:
-        runtime_session = handler.runtime_session
-        if runtime_session is not None:
-            await hass.async_add_executor_job(runtime_session.stop_and_join, 5.0)
+        await _shutdown_runtime()
         raise
 
     runtime_data = PixiePlusConfigEntryRuntimeData(
@@ -410,6 +596,7 @@ async def _async_build_runtime_data(
         cloud_params=cloud_params,
         pixie_runtime=pixie_runtime,
         coordinator=coordinator,
+        entry=entry,
     )
     coordinator.runtime_manager = runtime_data
     return runtime_data

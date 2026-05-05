@@ -278,6 +278,7 @@ class PixieRuntimeData:
     handler: "PixieAuthHandler"
     runtime_session: Optional[PixieRuntimeSession]
     inventory: Optional[PixieInventory]
+    inventory_mode: str
 
 
 # ============================================================================
@@ -448,6 +449,7 @@ class PixieAuthHandler:
         self.runtime_session: Optional[PixieRuntimeSession] = None
         self.stored_username: Optional[str] = None
         self.stored_password: Optional[str] = None
+        self.inventory_mode: str = "local_53216"
         self._command_counter = 0x10  # Start at 0x10 to match app UI: 10, 11, 12, 13...
         self._cached_cloud_home_obj: Optional[Dict[str, Any]] = None
         self._pending_bulk_ble_updates: List[Dict[str, Any]] = []
@@ -755,6 +757,7 @@ class PixieAuthHandler:
                 self._log_warning("GwData bulk not ready before timeout; using cloud fallback snapshot")
 
         if inventory_loaded:
+            self.inventory_mode = "local_53216"
             return True
 
         self._log_debug("Falling back to Home API inventory snapshot")
@@ -768,6 +771,7 @@ class PixieAuthHandler:
             inventory_user_id = str(self.user_id) if self.user_id not in (None, "", "unknown") else "unknown"
             fallback_source = "cloud_fallback_cached" if home_obj is cloud_home_cached else "cloud_fallback"
             self._set_inventory_from_home_object(home_obj, inventory_user_id, source=fallback_source)
+            self.inventory_mode = "cloud_fallback"
             self._log_debug("Startup inventory source: %s", fallback_source)
             return True
 
@@ -865,6 +869,7 @@ class PixieAuthHandler:
             handler=self,
             runtime_session=self.runtime_session,
             inventory=self.inventory,
+            inventory_mode=self.inventory_mode,
         )
 
     async def async_bootstrap_gateway(self, cloud_params: CloudParams, **kwargs: Any) -> PixieRuntimeData:
