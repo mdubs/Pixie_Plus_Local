@@ -31,6 +31,10 @@ TCP_CONTROL_PORT = 41578
 BROADCAST_ADDRESS = "255.255.255.255"
 RUNTIME_IDLE_TIMEOUT_SECONDS = 45.0
 RUNTIME_MAX_CONSECUTIVE_HEARTBEAT_FAILURES = 3
+RUNTIME_COMMAND_BASE_TIMEOUT_SECONDS = 10.0
+RUNTIME_COMMAND_PER_AHEAD_SECONDS = 2.0
+RUNTIME_COMMAND_MAX_TIMEOUT_SECONDS = 60.0
+RUNTIME_COMMAND_MIN_GAP_SECONDS = 0.25
 from datetime import datetime, timezone
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
@@ -104,6 +108,11 @@ class PixieRuntimeSession:
     connection_closed_at: Optional[float] = None
     consecutive_heartbeat_failures: int = 0
     thread: Optional[threading.Thread] = None
+    command_state_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    command_sequence: int = 0
+    active_command_id: Optional[int] = None
+    active_command_started_at: Optional[float] = None
+    last_command_sent_at: Optional[float] = None
 
     def _update_health_state(self, **kwargs: Any) -> None:
         self.ready_state.update(kwargs)
@@ -236,7 +245,59 @@ class PixieRuntimeSession:
 
         return (ts_now - last_activity) >= idle_timeout
 
-    def send_command(self, command_kwargs: Dict[str, Any], timeout: float = 10.0) -> Dict[str, Any]:
+    def reserve_command_slot(self) -> tuple[int, int]:
+        """Reserve a command slot and report how many commands are already ahead."""
+        with self.command_state_lock:
+            self.command_sequence += 1
+            queued = self.command_queue.qsize()
+            in_flight = 1 if self.active_command_id is not None else 0
+            return self.command_sequence, queued + in_flight
+
+    def mark_command_started(self, command_id: int) -> None:
+        """Mark a queued command as actively executing on the live session."""
+        with self.command_state_lock:
+            self.active_command_id = command_id
+            self.active_command_started_at = time.time()
+
+    def mark_command_finished(self, command_id: int) -> None:
+        """Clear the active command marker once execution completes."""
+        with self.command_state_lock:
+            if self.active_command_id == command_id:
+                self.active_command_id = None
+                self.active_command_started_at = None
+
+    def command_backlog_snapshot(self) -> Dict[str, Any]:
+        """Return current queue depth and active-command state for logging."""
+        with self.command_state_lock:
+            return {
+                "queued": self.command_queue.qsize(),
+                "active_command_id": self.active_command_id,
+                "active_for": (
+                    None
+                    if self.active_command_started_at is None
+                    else max(0.0, time.time() - self.active_command_started_at)
+                ),
+            }
+
+    def throttle_before_command_send(self, min_gap: float = RUNTIME_COMMAND_MIN_GAP_SECONDS) -> None:
+        """Enforce a minimum gap between queued command sends."""
+        with self.command_state_lock:
+            last_sent_at = self.last_command_sent_at
+
+        if last_sent_at is None:
+            return
+
+        remaining = min_gap - (time.time() - last_sent_at)
+        if remaining > 0:
+            time.sleep(remaining)
+
+    def mark_command_sent(self, when: Optional[float] = None) -> None:
+        """Record when a queued command was written to the TCP socket."""
+        ts = time.time() if when is None else float(when)
+        with self.command_state_lock:
+            self.last_command_sent_at = ts
+
+    def send_command(self, command_kwargs: Dict[str, Any], timeout: float = RUNTIME_COMMAND_BASE_TIMEOUT_SECONDS) -> Dict[str, Any]:
         """Send a local command via the existing control session."""
         if not self.is_alive():
             raise RuntimeError("Pixie control session is not running")
@@ -245,15 +306,27 @@ class PixieRuntimeSession:
         if not self.wait_until_primed(timeout=min(timeout, 5.0)):
             raise TimeoutError(f"Pixie control session is not primed (state={self.ready_state})")
 
+        command_id, commands_ahead = self.reserve_command_slot()
+        effective_timeout = min(
+            RUNTIME_COMMAND_MAX_TIMEOUT_SECONDS,
+            max(timeout, RUNTIME_COMMAND_BASE_TIMEOUT_SECONDS) + (commands_ahead * RUNTIME_COMMAND_PER_AHEAD_SECONDS),
+        )
         response_queue: "queue.Queue[Tuple[str, Any]]" = queue.Queue(maxsize=1)
         self.command_queue.put({
+            "command_id": command_id,
             "kwargs": dict(command_kwargs),
             "response_queue": response_queue,
         })
         try:
-            status, payload = response_queue.get(timeout=timeout)
+            status, payload = response_queue.get(timeout=effective_timeout)
         except queue.Empty as exc:
-            raise TimeoutError("Timed out waiting for live Pixie command dispatch") from exc
+            backlog = self.command_backlog_snapshot()
+            raise TimeoutError(
+                "Timed out waiting for live Pixie command completion "
+                f"(command_id={command_id}, ahead={commands_ahead}, timeout={effective_timeout:.1f}s, "
+                f"queued_now={backlog['queued']}, active_command_id={backlog['active_command_id']}, "
+                f"active_for={backlog['active_for']})"
+            ) from exc
 
         if status == "error":
             if isinstance(payload, Exception):
@@ -455,6 +528,7 @@ class PixieAuthHandler:
         self._pending_bulk_ble_updates: List[Dict[str, Any]] = []
         self._pending_bulk_lock = threading.Lock()
         self._inventory_update_callback: Optional[Callable[[PixieInventory], None]] = None
+        self._awaiting_initial_gwdata_bulk = False
 
     def _debug_enabled(self) -> bool:
         return self.verbose or LOGGER.isEnabledFor(logging.DEBUG)
@@ -511,7 +585,7 @@ class PixieAuthHandler:
         except Exception as e:
             self._log_warning("Could not dump structure file %s: %s", filename, e)
 
-    def _queue_bulk_ble_records(self, records: List[Dict[str, Any]], source: str) -> None:
+    def _queue_bulk_ble_records(self, records: List[Dict[str, Any]], source: str, *, full_snapshot: bool) -> None:
         """Queue bulk bleData records for later application once inventory exists."""
         if not records:
             return
@@ -519,6 +593,7 @@ class PixieAuthHandler:
             self._pending_bulk_ble_updates.append({
                 "source": source,
                 "records": records,
+                "full_snapshot": full_snapshot,
             })
 
     def _drain_bulk_ble_records(self) -> List[Dict[str, Any]]:
@@ -546,7 +621,7 @@ class PixieAuthHandler:
             "pct": value,
         }
 
-    def _apply_bulk_ble_records_to_inventory(self, records: List[Dict[str, Any]], source: str) -> int:
+    def _apply_bulk_ble_records_to_inventory(self, records: List[Dict[str, Any]], source: str, *, full_snapshot: bool) -> int:
         """Apply bulk bleData records to inventory runtime using minimal state fields.
 
         Only presence, brightness (scalar models), bitmask state via runtime.r,
@@ -554,7 +629,7 @@ class PixieAuthHandler:
         """
         if not self.inventory or not records:
             return 0
-        applied = self.inventory.apply_gwdata_bulk(records, source)
+        applied = self.inventory.apply_gwdata_bulk(records, source, full_snapshot=full_snapshot)
         if applied > 0:
             self._notify_inventory_updated()
         return applied
@@ -712,8 +787,13 @@ class PixieAuthHandler:
                 updated_ids = set()
                 for batch in pending_batches:
                     batch_source = str(batch.get("source") or "hub_gwdata")
+                    batch_full_snapshot = bool(batch.get("full_snapshot", False))
                     records = batch.get("records") if isinstance(batch.get("records"), list) else []
-                    total_applied += self._apply_bulk_ble_records_to_inventory(records, source=batch_source)
+                    total_applied += self._apply_bulk_ble_records_to_inventory(
+                        records,
+                        source=batch_source,
+                        full_snapshot=batch_full_snapshot,
+                    )
                     for rec_data in records:
                         try:
                             rec_id = int(rec_data.get("id"))
@@ -755,6 +835,8 @@ class PixieAuthHandler:
                 self._log_debug("Startup inventory source: hub %s + GwData bulk", TCP_SYNC_PORT)
             else:
                 self._log_warning("GwData bulk not ready before timeout; using cloud fallback snapshot")
+
+        self._awaiting_initial_gwdata_bulk = False
 
         if inventory_loaded:
             self.inventory_mode = "local_53216"
@@ -981,6 +1063,7 @@ class PixieAuthHandler:
 
         with self._pending_bulk_lock:
             self._pending_bulk_ble_updates.clear()
+        self._awaiting_initial_gwdata_bulk = True
 
         # Step 1: Fetch metadata from cloud API only when required.
         needs_login = login_required or not all([self.netid_seed, self.meshnet])
@@ -2131,10 +2214,17 @@ class PixieAuthHandler:
 
             if kind == "bulk":
                 self._log_debug("BLE decode (bulk): records=%s", len(records))
+                full_snapshot = self._awaiting_initial_gwdata_bulk
+                if full_snapshot:
+                    self._awaiting_initial_gwdata_bulk = False
                 _update_ready_state(saw_bulk_bledata=True)
-                self._queue_bulk_ble_records(records, source="hub_gwdata")
+                self._queue_bulk_ble_records(records, source="hub_gwdata", full_snapshot=full_snapshot)
                 if self.inventory:
-                    applied = self._apply_bulk_ble_records_to_inventory(records, source="hub_gwdata")
+                    applied = self._apply_bulk_ble_records_to_inventory(
+                        records,
+                        source="hub_gwdata",
+                        full_snapshot=full_snapshot,
+                    )
                     self._log_debug("Inventory bulk update: applied=%s", applied)
                 return
 
@@ -2634,15 +2724,10 @@ class PixieAuthHandler:
             command_route, command_match = _classify_message("out", command_parsed)
             _log_message("out", command_parsed, command_route, command_match)
             sock.sendall(command_b64.encode("utf-8"))
+            if runtime_session is not None:
+                runtime_session.mark_command_sent()
 
-            command_response_deadline = time.time() + 1.5
-            saw_command_traffic = False
-            while time.time() < command_response_deadline and not connection_closed and not should_stop.is_set():
-                if _drain_incoming() > 0:
-                    saw_command_traffic = True
-                time.sleep(0.05)
-            if not saw_command_traffic:
-                self._log_debug("No incoming TCP traffic in post-command response window")
+            _drain_incoming()
 
             if is_cover_cmd:
                 _apply_local_command_optimistic_update(
@@ -2957,8 +3042,12 @@ class PixieAuthHandler:
                                         except queue.Empty:
                                             break
 
+                                        command_id = command_request.get("command_id") if isinstance(command_request, dict) else None
                                         response_queue = command_request.get("response_queue") if isinstance(command_request, dict) else None
                                         request_kwargs = command_request.get("kwargs") if isinstance(command_request, dict) else None
+                                        if runtime_session is not None and isinstance(command_id, int):
+                                            runtime_session.mark_command_started(command_id)
+                                            runtime_session.throttle_before_command_send()
                                         try:
                                             result = _send_requested_local_command(**(request_kwargs or {}))
                                             if response_queue is not None:
@@ -2968,6 +3057,9 @@ class PixieAuthHandler:
                                                 response_queue.put(("error", exc))
                                             else:
                                                 self._log_warning("Live queued command failed: %s", exc)
+                                        finally:
+                                            if runtime_session is not None and isinstance(command_id, int):
+                                                runtime_session.mark_command_finished(command_id)
                                 time.sleep(0.1)
 
                             if connection_closed or should_stop.is_set():

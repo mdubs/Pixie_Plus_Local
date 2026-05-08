@@ -219,6 +219,8 @@ class DeviceStateStore:
         devices_by_id: Dict[int, "DeviceRecord"],
         records: List[Dict[str, Any]],
         source: str,
+        *,
+        full_snapshot: bool = False,
     ) -> int:
         """Apply GwData bulk records to runtime state for all known devices."""
         if not records:
@@ -277,18 +279,19 @@ class DeviceStateStore:
                 continue
             applied += 1
 
-        for inv_id, inv_rec in devices_by_id.items():
-            if inv_id not in present_ids:
-                runtime = self.apply_device_update(
-                    devices_by_id,
-                    inv_id,
-                    source=source,
-                    online=0,
-                    presence="offline",
-                    updated_ms=now_ms,
-                )
-                if runtime is None:
-                    continue
+        if full_snapshot:
+            for inv_id, inv_rec in devices_by_id.items():
+                if inv_id not in present_ids:
+                    runtime = self.apply_device_update(
+                        devices_by_id,
+                        inv_id,
+                        source=source,
+                        online=0,
+                        presence="offline",
+                        updated_ms=now_ms,
+                    )
+                    if runtime is None:
+                        continue
 
         return applied
 
@@ -521,9 +524,14 @@ class PixieInventory:
 
         return inv
 
-    def apply_gwdata_bulk(self, records: List[Dict[str, Any]], source: str) -> int:
+    def apply_gwdata_bulk(self, records: List[Dict[str, Any]], source: str, *, full_snapshot: bool = False) -> int:
         """Apply GwData bulk records to runtime state for all known devices."""
-        return self.state_store.apply_gwdata_bulk(self.devices_by_id, records, source)
+        return self.state_store.apply_gwdata_bulk(
+            self.devices_by_id,
+            records,
+            source,
+            full_snapshot=full_snapshot,
+        )
 
     def apply_device_update(self, device_id: int, *, source: str, **kwargs: Any) -> Optional[RuntimeState]:
         """Apply a normalized runtime patch to one inventory device."""

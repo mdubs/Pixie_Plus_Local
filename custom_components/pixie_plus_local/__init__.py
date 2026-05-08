@@ -423,36 +423,30 @@ class PixiePlusConfigEntryRuntimeData:
             await hass.async_add_executor_job(runtime_session.stop_and_join, 5.0)
 
     async def async_send_local_command(self, hass: HomeAssistant, **kwargs) -> None:
-        """Send a local command, preferring the live 41578 runtime session."""
+        """Send a local command using the single shared 41578 runtime session."""
+        runtime_session = await self.async_ensure_runtime(hass, reason="command_send")
         try:
-            runtime_session = await self.async_ensure_runtime(hass, reason="command_send")
-            await hass.async_add_executor_job(runtime_session.send_command, dict(kwargs), 10.0)
+            await hass.async_add_executor_job(runtime_session.send_command, dict(kwargs))
             self.coordinator.async_set_updated_data(self.pixie_runtime.inventory)
             return
         except Exception as err:
-            LOGGER.warning("Live Pixie runtime command path failed, falling back to one-shot bootstrap: %s", err)
-
-        # Fallback for cases where the control session is unavailable.
-        command_handler = PixieAuthHandler()
-        command_handler.inventory = self.pixie_runtime.inventory
-        command_handler.gateway_identity = self.pixie_runtime.inventory.gateway if self.pixie_runtime.inventory else None
-
-        try:
-            await command_handler.async_bootstrap_gateway(
-                self.cloud_params,
-                username="",
-                password="",
-                keep_control_alive=False,
-                wait_for_shutdown=False,
-                hydrate_inventory=False,
-                **kwargs,
+            runtime_unhealthy = (
+                not runtime_session.is_alive()
+                or runtime_session.needs_restart()
+                or runtime_session.connection_closed_at is not None
             )
-        finally:
-            runtime_session = command_handler.runtime_session
-            if runtime_session is not None:
-                await hass.async_add_executor_job(runtime_session.stop_and_join, 5.0)
+            if runtime_unhealthy:
+                LOGGER.warning("Live Pixie runtime command failed; restarting shared runtime: %s", err)
+                recovered_session = await self.async_ensure_runtime(
+                    hass,
+                    reason="command_send_recovery",
+                )
+                await hass.async_add_executor_job(recovered_session.send_command, dict(kwargs))
+                self.coordinator.async_set_updated_data(self.pixie_runtime.inventory)
+                return
 
-        self.coordinator.async_set_updated_data(self.pixie_runtime.inventory)
+            LOGGER.warning("Live Pixie runtime command failed on shared runtime: %s", err)
+            raise
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
