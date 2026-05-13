@@ -16,7 +16,7 @@ Unlike the older Pixie Plus integration, this one controls the gateway locally o
 ## Features
 
 - Automatic gateway discovery
-- Local control through the Pixie Plus hub
+- Local control through the Pixie Plus gateway
 - Local push-style state updates from the live gateway session
 - Lights, dimmers, switches, smart plugs, RGB strip control, and blinds
 - Blind button mapping is now done through the UI
@@ -25,11 +25,11 @@ The integration intentionally does not implement Pixie Plus groups, scenes, sche
 
 ## Requirements
 
-- A Pixie Plus hub on the same local network as Home Assistant
+- A Pixie Plus gateway on the same local network as Home Assistant
 - All devices already paired and configured in the official Pixie Plus app
 - A working Pixie account for the initial setup step
 
-This integration is for hub-based Pixie Plus systems. It does not expose direct Bluetooth-only control.
+This integration is for gateway-based Pixie Plus systems. It does not expose direct Bluetooth-only control.
 
 ## Supported Devices
 
@@ -116,11 +116,11 @@ Important notes:
 - If you have multiple blind controllers, each controller can be configured separately.
 - You can change blind mappings later from the integration's options flow in Home Assistant.
 
-Blind entities are exposed as assumed-state covers. The integration sends the configured button commands locally, but it does not derive an exact open percentage from the hub.
+Blind entities are exposed as assumed-state covers. The integration sends the configured button commands locally, but it does not derive a state from the gateway.
 
 ## Known Limitations
 
-- The integration requires a Pixie Plus hub.
+- The integration requires a Pixie Plus gateway.
 - Devices must already be set up in the official Pixie app.
 - Pixie cloud login is required during the initial setup flow.
 - The integration will attempt local inventory refresh but if unsuccessful will operate in a hybrid mode where it requires the cloud on each startup to build the inventory but will otherwise use local communication. In that case, the Pixie Plus username and password will be stored in Home Assistant.
@@ -131,8 +131,8 @@ Blind entities are exposed as assumed-state covers. The integration sends the co
 If setup fails:
 
 - Verify your Pixie username and password.
-- Make sure Home Assistant and the Pixie hub are on the same LAN.
-- Confirm that the hub and devices are already working in the Pixie app.
+- Make sure Home Assistant and the Pixie gateway are on the same LAN.
+- Confirm that the gateway and devices are already working in the Pixie app.
 - Check the Home Assistant logs for `pixie_plus_local` messages.
 
 If blind actions are wrong:
