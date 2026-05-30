@@ -2303,6 +2303,8 @@ class PixieAuthHandler:
                     usb_on = bool(interpreted.get("usb_on"))
                     update_kwargs["r"] = (1 if relay_on else 0) | (2 if usb_on else 0)
                     update_kwargs["br"] = 100 if relay_on else 0
+                elif mode == "presence":
+                    update_kwargs["motion_detected"] = bool(interpreted.get("motion_detected"))
                 elif mode == "raw":
                     # Raw on/off-only models use the value byte directly.
                     # Keep tail-derived fields for debugging only until their
@@ -2344,6 +2346,8 @@ class PixieAuthHandler:
             elif interpreted and interpreted.get("mode") == "dual_channel":
                 summary_parts.append(f"r {prev_r}->{updated_runtime.r}")
                 summary_parts.append(f"channel={interpreted.get('channel_state')}")
+            elif interpreted and interpreted.get("mode") == "presence":
+                summary_parts.append(f"motion={updated_runtime.motion_detected}")
             elif interpreted and interpreted.get("mode") == "raw" and isinstance(on_tail, bool):
                 summary_parts.append(f"on_tail={on_tail}")
                 summary_parts.append(f"br {prev_br}->{updated_runtime.br}")

@@ -26,6 +26,7 @@ hardware_list = {
     "2212": "Smart Switch G2 - SWL350BT",
     "2312": "Smart Dimmer G2 - SDD350BT",
     "2311": "Smart Dimmer G2 - SDD350BT",
+    "3002": "Smart PIR Sensor - SMS862WF/WH/BTAM",
 }
 
 # Unified model capability truth.
@@ -185,6 +186,16 @@ MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
         "supports_usb_subentity": False,
         "supports_cover": False,
     },
+    "3002": {
+        "supports_onoff": False,
+        "supports_dimming": False,
+        "supports_color": False,
+        "supports_effects": False,
+        "supports_multi_channel": False,
+        "supports_usb_subentity": False,
+        "supports_cover": False,
+        "supports_presence": True,
+    },
 }
 
 
@@ -202,6 +213,7 @@ def get_model_capabilities(model_no: str) -> Dict[str, Any]:
         "supports_multi_channel": bool(caps.get("supports_multi_channel", False)),
         "supports_usb_subentity": bool(caps.get("supports_usb_subentity", False)),
         "supports_cover": bool(caps.get("supports_cover", False)),
+        "supports_presence": bool(caps.get("supports_presence", False)),
     }
 
 
@@ -283,6 +295,7 @@ MODE_RAW = "raw"
 MODE_BRIGHTNESS = "brightness"
 MODE_DUAL_CHANNEL = "dual_channel"
 MODE_PLUG_WITH_USB = "plug_with_usb"
+MODE_PRESENCE = "presence"
 
 def _decode_mode_from_capabilities(model_no: str) -> str:
     """Resolve value-byte decoding mode from the model capability flags.
@@ -292,6 +305,8 @@ def _decode_mode_from_capabilities(model_no: str) -> str:
     """
     capabilities = get_model_capabilities(model_no)
 
+    if capabilities.get("supports_presence"):
+        return MODE_PRESENCE
     if capabilities["supports_usb_subentity"]:
         return MODE_PLUG_WITH_USB
     if capabilities["supports_multi_channel"]:
@@ -343,6 +358,12 @@ def decode_value_byte(model_no: str, value_byte: int) -> Dict[str, Any]:
         # This corresponds to bit1 toggling USB state.
         result["main_relay_on"] = bool(value_byte & 0x01)
         result["usb_on"] = bool(value_byte & 0x02)
+        return result
+
+    if mode == MODE_PRESENCE:
+        # PIR sensor model 3002: bit 0 of value_byte indicates motion.
+        # value_byte 55 (0x37) -> motion detected, 52 (0x34) -> cleared.
+        result["motion_detected"] = bool(value_byte & 0x01)
         return result
 
     return result

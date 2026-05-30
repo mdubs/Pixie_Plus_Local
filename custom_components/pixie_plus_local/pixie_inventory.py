@@ -108,6 +108,7 @@ class RuntimeState:
     online: Any = None
     presence: str = "offline"
     is_on: Optional[bool] = None
+    motion_detected: Optional[bool] = None
     br: Optional[int] = None
     rgb: Optional[List[int]] = None
     effect: Optional[str] = None
@@ -122,6 +123,7 @@ class RuntimeState:
             "online": self.online,
             "presence": self.presence,
             "is_on": self.is_on,
+            "motion_detected": self.motion_detected,
             "br": self.br,
             "rgb": self.rgb,
             "effect": self.effect,
@@ -138,6 +140,7 @@ class RuntimeState:
             online=data.get("online"),
             presence=str(data.get("presence") or "offline"),
             is_on=data.get("is_on"),
+            motion_detected=data.get("motion_detected"),
             br=data.get("br"),
             rgb=list(data.get("rgb")) if isinstance(data.get("rgb"), list) else None,
             effect=data.get("effect"),
@@ -170,6 +173,7 @@ class DeviceStateStore:
         source: str,
         online: Any = STATE_UNSET,
         presence: Any = STATE_UNSET,
+        motion_detected: Any = STATE_UNSET,
         br: Any = STATE_UNSET,
         rgb: Any = STATE_UNSET,
         effect: Any = STATE_UNSET,
@@ -192,6 +196,8 @@ class DeviceStateStore:
         elif online is not STATE_UNSET:
             runtime.presence = "online" if online_value_is_online(online) else "offline"
 
+        if motion_detected is not STATE_UNSET:
+            runtime.motion_detected = motion_detected
         if br is not STATE_UNSET:
             runtime.br = br
         if rgb is not STATE_UNSET:
